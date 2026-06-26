@@ -67,6 +67,7 @@ mod dex;
 mod error;
 mod event;
 mod replayer;
+mod sink;
 mod tape;
 mod time;
 
@@ -77,5 +78,6 @@ pub use event::{
     parse_stream, EventKind, ParseStats, TapeEvent, TokenMeta, NATIVE_SOL_MINT, WSOL_MINT,
 };
 pub use replayer::{Plan, ReplayConfig, Replayer, RunReport};
+pub use sink::TokenTapeWriter;
 pub use tape::{build_step, HourData, TapeStep, TokenTape};
 pub use time::{Hour, HourRange};

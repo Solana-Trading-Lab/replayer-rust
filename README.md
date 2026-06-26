@@ -88,6 +88,37 @@ let report = replayer.run(|step| {
 println!("{} steps, {} tapes", report.steps_emitted, report.tapes_total);
 ```
 
+### Storing results token-by-token, by day
+
+To persist each token tape as its own file under a per-day folder, use the
+built-in [`TokenTapeWriter`] (or the `run_to_dir` shortcut):
+
+```rust
+// Shortcut: writes <root>/<YYYY-MM-DD>/<mint>.json for every tape.
+replayer.run_to_dir("./tapes")?;
+
+// Or drive the writer yourself (e.g. to also log / index per step):
+use pump_replayer::TokenTapeWriter;
+let writer = TokenTapeWriter::new("./tapes").pretty(true);
+replayer.run(|step| { writer.write_step(step)?; Ok(()) })?;
+```
+
+Resulting layout (the day is the token's birth / anchor hour's date):
+
+```text
+tapes/
+  2026-06-24/
+    <mint-a>.json      # full TokenTape: birth, meta, chronological trades
+    <mint-b>.json
+  2026-06-25/
+    <mint-c>.json
+```
+
+Each token is born in exactly one anchor hour, so within a run (fixed DEX
+filter) each `<mint>.json` is written once. Files are flushed per anchor hour, so
+the bounded-storage stepping is preserved — tapes are never all held in memory at
+once.
+
 ### Configuration knobs
 
 `ReplayConfig::new(period, window_hours, dex, work_dir)` then chain:

@@ -403,6 +403,15 @@ impl Replayer {
         }
     }
 
+    /// Convenience: run and persist every token tape to disk as
+    /// `root/<YYYY-MM-DD>/<mint>.json` (grouped by the token's birth day). This
+    /// keeps the bounded-storage stepping — tapes are flushed per anchor hour,
+    /// never all held at once.
+    pub fn run_to_dir(&mut self, root: impl Into<PathBuf>) -> Result<RunReport> {
+        let writer = crate::sink::TokenTapeWriter::new(root);
+        self.run(|step| writer.write_step(step).map(|_| ()))
+    }
+
     /// Convenience: run and collect every step into a Vec. Only suitable for
     /// small periods — defeats the memory bound for large ones.
     pub fn run_collect(&mut self) -> Result<(Vec<TapeStep>, RunReport)> {

@@ -89,6 +89,13 @@ impl Hour {
         )
     }
 
+    /// Calendar date of this hour as `YYYY-MM-DD`, e.g. `2026-04-18`. Handy for
+    /// naming per-day output folders.
+    pub fn date_str(self) -> String {
+        let dt = self.start();
+        format!("{:04}-{:02}-{:02}", dt.year(), dt.month(), dt.day())
+    }
+
     /// Archive-relative directory of this hour's day, e.g. `2026/04/18/`.
     pub fn day_path(self) -> String {
         let dt = self.start();

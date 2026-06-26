@@ -11,7 +11,9 @@
 use std::fs;
 use std::path::PathBuf;
 
-use pump_replayer::{Dex, DexFilter, Hour, HourRange, ReplayConfig, Replayer, Result};
+use pump_replayer::{
+    Dex, DexFilter, Hour, HourRange, ReplayConfig, Replayer, Result, TokenTapeWriter,
+};
 
 fn parse_hour(s: &str) -> Hour {
     // Accepts "YYYY-MM-DDTHH" (UTC).
@@ -49,7 +51,10 @@ fn main() -> Result<()> {
     let out = PathBuf::from(arg(&args, "--out").unwrap_or_else(|| "./tapes_out".into()));
     fs::create_dir_all(&out).expect("create out dir");
 
-    let work_dir = out.join("_zst_cache");
+    // Keep the transient .zst download cache out of the result tree.
+    let work_dir = arg(&args, "--cache")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("pump_replayer_cache"));
     let cfg = ReplayConfig::new(HourRange::new(start, end), window, dex, work_dir);
 
     let mut replayer = Replayer::new(cfg)?;
@@ -66,17 +71,24 @@ fn main() -> Result<()> {
         plan.effective_anchors.last()
     );
 
+    // Persist token-by-token into per-day folders: <out>/<YYYY-MM-DD>/<mint>.json
+    let writer = TokenTapeWriter::new(&out).pretty(true);
     let report = replayer.run(|step| {
-        let file = out.join(format!("{}.json", step.anchor_hour.cache_file_name().replace(".jsonl.zst", "")));
-        let json = serde_json::to_vec_pretty(step).expect("serialize step");
-        fs::write(&file, json)?;
-        println!("{} -> {} tapes", step.anchor_hour, step.tapes.len());
+        let n = writer.write_step(step)?;
+        println!(
+            "{} ({}) -> {} token tape(s)",
+            step.anchor_hour,
+            step.anchor_hour.date_str(),
+            n
+        );
         Ok(())
     })?;
 
     println!(
-        "done: {} steps, {} tapes total",
-        report.steps_emitted, report.tapes_total
+        "done: {} steps, {} token tapes written under {}",
+        report.steps_emitted,
+        report.tapes_total,
+        out.display()
     );
     Ok(())
 }
