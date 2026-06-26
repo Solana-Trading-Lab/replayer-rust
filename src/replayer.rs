@@ -40,6 +40,13 @@ pub struct ReplayConfig {
     /// `false`: each hour's file is deleted as soon as it is no longer needed, so
     /// at most `window_hours` compressed files exist on disk at once.
     pub keep_files: bool,
+    /// Exclude tokens whose birth event is in pump.fun "mayhem mode". Default
+    /// `true`.
+    pub exclude_mayhem: bool,
+    /// Preserve the complete original JSON of every transaction in
+    /// [`TapeEvent::raw`](crate::TapeEvent). Default `true`. Set `false` to lower
+    /// memory when only the typed fields are needed.
+    pub keep_raw: bool,
 }
 
 impl ReplayConfig {
@@ -60,6 +67,8 @@ impl ReplayConfig {
             ]),
             include_kinds: HashSet::from([EventKind::Buy, EventKind::Sell]),
             keep_files: false,
+            exclude_mayhem: true,
+            keep_raw: true,
         }
     }
 
@@ -81,6 +90,14 @@ impl ReplayConfig {
     }
     pub fn keep_files(mut self, keep: bool) -> Self {
         self.keep_files = keep;
+        self
+    }
+    pub fn exclude_mayhem(mut self, exclude: bool) -> Self {
+        self.exclude_mayhem = exclude;
+        self
+    }
+    pub fn keep_raw(mut self, keep: bool) -> Self {
+        self.keep_raw = keep;
         self
     }
 
@@ -294,6 +311,7 @@ impl Replayer {
                 &self.cfg.dex,
                 &self.cfg.birth_kinds,
                 &self.cfg.include_kinds,
+                self.cfg.exclude_mayhem,
                 &window,
             );
             // Put the borrowed hours back (window_view temporarily removed them).
@@ -332,7 +350,8 @@ impl Replayer {
         log::debug!("decompressing + parsing {}", path.display());
         let file = fs::File::open(&path)?;
         let decoder = zstd::stream::read::Decoder::new(file)?;
-        let (events, metas, stats) = parse_stream(decoder, &self.cfg.dex, &self.keep_kinds)?;
+        let (events, metas, stats) =
+            parse_stream(decoder, &self.cfg.dex, &self.keep_kinds, self.cfg.keep_raw)?;
         log::debug!(
             "{hour}: kept {} of {} candidate event line(s) ({} total lines, {} parse error(s))",
             stats.kept,

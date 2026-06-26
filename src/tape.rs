@@ -36,7 +36,10 @@ pub struct TokenTape {
     pub window_start_ms: i64,
     /// Window end (exclusive), ms — anchor start + `window_hours`.
     pub window_end_ms: i64,
-    /// Trades within the window, chronological.
+    /// pump.fun "mayhem mode" flag for this token, from its birth event.
+    pub mayhem_mode: Option<bool>,
+    /// Trades within the window, chronological. Each event's full original JSON
+    /// is preserved in [`TapeEvent::raw`] when the replayer keeps raw records.
     pub events: Vec<TapeEvent>,
 }
 
@@ -78,6 +81,7 @@ pub fn build_step(
     filter: &DexFilter,
     birth_kinds: &HashSet<EventKind>,
     include_kinds: &HashSet<EventKind>,
+    exclude_mayhem: bool,
     loaded: &[HourData],
 ) -> TapeStep {
     let window_start = anchor.start_ms();
@@ -92,6 +96,10 @@ pub fn build_step(
                 continue;
             }
             if !filter.matches(&ev.pool) {
+                continue;
+            }
+            // Drop mayhem-mode tokens entirely when asked to.
+            if exclude_mayhem && ev.mayhem_mode == Some(true) {
                 continue;
             }
             if ev.timestamp_ms < window_start || ev.timestamp_ms >= anchor.end_ms() {
@@ -166,6 +174,7 @@ pub fn build_step(
         tapes.push(TokenTape {
             mint: mint.to_string(),
             dex: birth.dex,
+            mayhem_mode: birth.mayhem_mode,
             birth: birth.clone(),
             meta: meta_for.get(mint).map(|m| (*m).clone()),
             window_start_ms: window_start,
@@ -187,6 +196,16 @@ mod tests {
     use crate::dex::Dex;
 
     fn ev(mint: &str, kind: EventKind, ts: i64, pool: &str) -> TapeEvent {
+        ev_mayhem(mint, kind, ts, pool, None)
+    }
+
+    fn ev_mayhem(
+        mint: &str,
+        kind: EventKind,
+        ts: i64,
+        pool: &str,
+        mayhem: Option<bool>,
+    ) -> TapeEvent {
         TapeEvent {
             signature: format!("{mint}-{ts}-{:?}", kind),
             kind,
@@ -205,6 +224,8 @@ mod tests {
             timestamp_ms: ts,
             local_timestamp_ms: None,
             block: None,
+            mayhem_mode: mayhem,
+            raw: serde_json::Value::Null,
         }
     }
 
@@ -250,6 +271,7 @@ mod tests {
             &DexFilter::only(Dex::Pump),
             &birth_kinds(),
             &include_kinds(),
+            true,
             &[hd0, hd1, hd2],
         );
 
@@ -283,9 +305,51 @@ mod tests {
             &DexFilter::only(Dex::Pump),
             &birth_kinds(),
             &include_kinds(),
+            true,
             &[hd0],
         );
         assert_eq!(step.tapes.len(), 1);
         assert_eq!(step.tapes[0].mint, "P");
+    }
+
+    #[test]
+    fn mayhem_tokens_are_filtered_out() {
+        let h0 = Hour::from_ymdh(2026, 4, 18, 0).unwrap();
+        let s0 = h0.start_ms();
+        let hd0 = HourData {
+            hour: h0,
+            events: vec![
+                // M is a mayhem-mode token; N is normal.
+                ev_mayhem("M", EventKind::Create, s0 + 1, "pump", Some(true)),
+                ev_mayhem("M", EventKind::Buy, s0 + 2, "pump", Some(true)),
+                ev_mayhem("N", EventKind::Create, s0 + 3, "pump", Some(false)),
+                ev_mayhem("N", EventKind::Buy, s0 + 4, "pump", Some(false)),
+            ],
+            metas: HashMap::new(),
+        };
+
+        // exclude_mayhem = true -> only N survives.
+        let step = build_step(
+            h0, 1, &DexFilter::only(Dex::Pump), &birth_kinds(), &include_kinds(), true, &[hd0],
+        );
+        assert_eq!(step.tapes.len(), 1);
+        assert_eq!(step.tapes[0].mint, "N");
+        assert_eq!(step.tapes[0].mayhem_mode, Some(false));
+
+        // exclude_mayhem = false -> both kept, mayhem flag exposed.
+        let hd0 = HourData {
+            hour: h0,
+            events: vec![
+                ev_mayhem("M", EventKind::Create, s0 + 1, "pump", Some(true)),
+                ev_mayhem("N", EventKind::Create, s0 + 3, "pump", Some(false)),
+            ],
+            metas: HashMap::new(),
+        };
+        let step = build_step(
+            h0, 1, &DexFilter::only(Dex::Pump), &birth_kinds(), &include_kinds(), false, &[hd0],
+        );
+        assert_eq!(step.tapes.len(), 2);
+        let m = step.tapes.iter().find(|t| t.mint == "M").unwrap();
+        assert_eq!(m.mayhem_mode, Some(true));
     }
 }

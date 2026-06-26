@@ -132,6 +132,11 @@ once.
   `Sell`; add `Add`/`Remove` for liquidity events).
 - `.keep_files(true)` — keep `.zst` files after they slide out (default `false`
   = delete to bound disk usage).
+- `.exclude_mayhem(false)` — keep pump.fun "mayhem mode" tokens (default `true`
+  = drop any token whose birth event has `mayhemMode: true`).
+- `.keep_raw(false)` — drop the full per-transaction JSON (default `true` = keep
+  the complete original event in `TapeEvent.raw`, so no tx info is lost; set
+  `false` to lower memory when only the typed fields are needed).
 
 `DexFilter`: `DexFilter::only(Dex::Pump)`, `DexFilter::dexes([Dex::Pump, Dex::PumpSwap])`,
 `DexFilter::all()`, or `.with_pools(["raydium-cpmm"])` for exact raw pool strings.
@@ -141,19 +146,28 @@ once.
 ```bash
 RUST_LOG=info cargo run --example run -- \
   --start 2026-06-24T00 --end 2026-06-24T05 \
-  --window 3 --dex pump --out ./tapes_out
+  --window 3 --dex pump --out ./tapes
 ```
 
-Writes one JSON file per anchor hour into `--out` and prints a summary.
-`--dex` accepts `pump`, `pumpswap`, `raydium`, `meteora` (omit for all).
+Writes one token tape per file under `--out/<YYYY-MM-DD>/<mint>.json` and prints a
+summary. `--dex` accepts `pump`, `pumpswap`, `raydium`, `meteora` (omit for all).
+Extra flags: `--include-mayhem` (keep mayhem-mode tokens), `--no-raw` (drop the
+full per-tx JSON), `--cache <dir>` (where to put the transient `.zst` files).
 
 ## Output types
 
 `TapeStep { anchor_hour, window_hours, tapes: Vec<TokenTape> }` where each
-`TokenTape` has `mint`, `dex`, `birth` (the anchoring event), `meta`
-(name/symbol/uri/supply if a create supplied them), `window_start_ms`,
+`TokenTape` has `mint`, `dex`, `mayhem_mode`, `birth` (the anchoring event),
+`meta` (name/symbol/uri/supply if a create supplied them), `window_start_ms`,
 `window_end_ms`, and `events` (chronological trades). Helpers: `num_buys()`,
 `num_sells()`, `volume_sol()`, `last_price()`. All output types are `Serialize`.
+
+Each `TapeEvent` keeps the typed fields (signature, kind, pool, amounts, price,
+`block`, `timestamp_ms`, `mayhem_mode`, …) **plus** `raw` — the complete original
+JSON object for that transaction (`priorityFee`, `postBalances`,
+`tradersInvolved`, `tokenProgram`, bonding-curve reserves, etc.), so the full tx
+record is available downstream. `raw` is present only when `keep_raw` is on
+(default) and is omitted from the JSON when empty.
 
 ## Event schema reference
 

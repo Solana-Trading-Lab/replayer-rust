@@ -100,10 +100,13 @@ mod tests {
             timestamp_ms: 0,
             local_timestamp_ms: None,
             block: None,
+            mayhem_mode: Some(false),
+            raw: serde_json::Value::Null,
         };
         TokenTape {
             mint: mint.into(),
             dex: Dex::Pump,
+            mayhem_mode: Some(false),
             birth,
             meta: None,
             window_start_ms: 0,

@@ -55,7 +55,11 @@ fn main() -> Result<()> {
     let work_dir = arg(&args, "--cache")
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("pump_replayer_cache"));
-    let cfg = ReplayConfig::new(HourRange::new(start, end), window, dex, work_dir);
+    let cfg = ReplayConfig::new(HourRange::new(start, end), window, dex, work_dir)
+        // --include-mayhem keeps mayhem-mode tokens (default: filter them out).
+        .exclude_mayhem(!args.iter().any(|a| a == "--include-mayhem"))
+        // --no-raw drops the full per-tx JSON (default: keep whole tx info).
+        .keep_raw(!args.iter().any(|a| a == "--no-raw"));
 
     let mut replayer = Replayer::new(cfg)?;
 

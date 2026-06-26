@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::dex::{Dex, DexFilter};
 use crate::error::Result;
@@ -85,6 +86,9 @@ struct RawEvent {
     #[serde(rename = "localTimestamp")]
     local_timestamp: Option<i64>,
     block: Option<u64>,
+    /// pump.fun "mayhem mode" flag (present on pump / pump-amm events).
+    #[serde(rename = "mayhemMode")]
+    mayhem_mode: Option<bool>,
     // create / createPool / migrate metadata
     name: Option<String>,
     symbol: Option<String>,
@@ -125,6 +129,14 @@ pub struct TapeEvent {
     /// Millisecond timestamp the Frankfurt server received the tx (replay only).
     pub local_timestamp_ms: Option<i64>,
     pub block: Option<u64>,
+    /// pump.fun "mayhem mode" flag, when the event carries it.
+    pub mayhem_mode: Option<bool>,
+    /// The complete, untouched event object exactly as it appeared in the
+    /// archive — so no transaction information is lost. Populated when the
+    /// replayer is configured with `keep_raw = true` (the default); otherwise
+    /// `null` and omitted from serialization.
+    #[serde(skip_serializing_if = "Value::is_null")]
+    pub raw: Value,
 }
 
 impl TapeEvent {
@@ -148,6 +160,8 @@ pub struct TokenMeta {
     pub supply: Option<f64>,
     pub decimals: Option<u32>,
     pub initial_buy: Option<f64>,
+    /// pump.fun "mayhem mode" flag for the token, from its birth event.
+    pub mayhem_mode: Option<bool>,
 }
 
 /// Diagnostics for a parsed hour, so silent schema drift surfaces as a signal
@@ -175,12 +189,17 @@ impl ParseStats {
 /// Parse a decompressed JSONL stream into compact events, keeping only events
 /// that (a) match `filter` and (b) have a kind in `keep_kinds`.
 ///
+/// When `keep_raw` is true, the complete original JSON object of every kept event
+/// is preserved in [`TapeEvent::raw`], so no transaction detail is lost; set it
+/// false to save memory when only the typed fields are needed.
+///
 /// Returns the kept events (in file order, i.e. chronological), a map of any
 /// token metadata discovered, and [`ParseStats`] for diagnostics.
 pub fn parse_stream<R: Read>(
     reader: R,
     filter: &DexFilter,
     keep_kinds: &HashSet<EventKind>,
+    keep_raw: bool,
 ) -> Result<(Vec<TapeEvent>, HashMap<String, TokenMeta>, ParseStats)> {
     let buf = BufReader::with_capacity(1 << 20, reader);
     let mut events = Vec::new();
@@ -196,11 +215,21 @@ pub fn parse_stream<R: Read>(
             continue;
         }
         stats.pool_lines += 1;
-        let raw: RawEvent = match serde_json::from_str(&line) {
-            Ok(r) => r,
+        // Parse the whole object once. The typed view is derived from it (so the
+        // full record is available for `raw`); aliases on `RawEvent` keep this
+        // working across the mid-2026 field rename.
+        let value: Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
             // Tolerate the occasional malformed/partial line rather than aborting
             // a multi-hundred-MB stream, but count it so a real schema break is
             // not mistaken for "no matching data".
+            Err(_) => {
+                stats.parse_errors += 1;
+                continue;
+            }
+        };
+        let raw: RawEvent = match RawEvent::deserialize(&value) {
+            Ok(r) => r,
             Err(_) => {
                 stats.parse_errors += 1;
                 continue;
@@ -226,6 +255,7 @@ pub fn parse_stream<R: Read>(
                 supply: raw.supply,
                 decimals: raw.decimals,
                 initial_buy: raw.initial_buy,
+                mayhem_mode: raw.mayhem_mode,
             });
         }
 
@@ -247,6 +277,8 @@ pub fn parse_stream<R: Read>(
             timestamp_ms: raw.timestamp,
             local_timestamp_ms: raw.local_timestamp,
             block: raw.block,
+            mayhem_mode: raw.mayhem_mode,
+            raw: if keep_raw { value } else { Value::Null },
         });
         stats.kept += 1;
     }
@@ -263,7 +295,7 @@ mod tests {
     const SAMPLE: &str = concat!(
         r#"{"signature":"s1","txType":"transfer","txSigner":"x","transfers":[],"timestamp":1}"#,
         "\n",
-        r#"{"signature":"s2","txType":"create","poolId":"p","mint":"MINTpump","txSigner":"dev","solAmount":6.0,"price":4.0e-8,"name":"Asteroid","symbol":"AST","uri":"u","supply":1000000000,"decimals":6,"initialBuy":178833333.0,"pool":"pump","timestamp":1776474007203}"#,
+        r#"{"signature":"s2","txType":"create","poolId":"p","mint":"MINTpump","txSigner":"dev","solAmount":6.0,"price":4.0e-8,"name":"Asteroid","symbol":"AST","uri":"u","supply":1000000000,"decimals":6,"initialBuy":178833333.0,"pool":"pump","mayhemMode":false,"timestamp":1776474007203}"#,
         "\n",
         r#"{"signature":"s3","txType":"buy","poolId":"p2","mint":"MINTpump","txSigner":"alice","tokenAmount":123.0,"solAmount":0.5,"price":4.1e-7,"pool":"pump-amm","timestamp":1776474010000}"#,
         "\n",
@@ -285,7 +317,7 @@ mod tests {
     #[test]
     fn parses_and_filters() {
         let (events, metas, stats) =
-            parse_stream(SAMPLE.as_bytes(), &DexFilter::all(), &keep_all()).unwrap();
+            parse_stream(SAMPLE.as_bytes(), &DexFilter::all(), &keep_all(), true).unwrap();
         assert_eq!(events.len(), 3); // transfer skipped, both schemas kept
         assert_eq!(stats.lines, 4);
         assert_eq!(stats.pool_lines, 3); // transfer line has no top-level "pool"
@@ -297,12 +329,30 @@ mod tests {
         assert_eq!(events[1].dex, Dex::PumpSwap);
         let m = metas.get("MINTpump").unwrap();
         assert_eq!(m.symbol.as_deref(), Some("AST"));
+        assert_eq!(m.mayhem_mode, Some(false));
+    }
+
+    #[test]
+    fn keeps_full_raw_when_requested() {
+        let (events, _, _) =
+            parse_stream(SAMPLE.as_bytes(), &DexFilter::all(), &keep_all(), true).unwrap();
+        // The whole original object is preserved, including fields the typed view
+        // never models (e.g. `uri`, and `transfers`-style extras if present).
+        let create = events.iter().find(|e| e.signature == "s2").unwrap();
+        assert_eq!(create.raw["mayhemMode"], serde_json::json!(false));
+        assert_eq!(create.raw["uri"], serde_json::json!("u"));
+        assert_eq!(create.mayhem_mode, Some(false));
+
+        // When keep_raw is false, raw is null (and omitted from serialization).
+        let (events, _, _) =
+            parse_stream(SAMPLE.as_bytes(), &DexFilter::all(), &keep_all(), false).unwrap();
+        assert!(events[0].raw.is_null());
     }
 
     #[test]
     fn parses_new_schema_via_aliases() {
         let (events, _, _) =
-            parse_stream(SAMPLE.as_bytes(), &DexFilter::all(), &keep_all()).unwrap();
+            parse_stream(SAMPLE.as_bytes(), &DexFilter::all(), &keep_all(), true).unwrap();
         let e = events.iter().find(|e| e.mint == "MINTnew").unwrap();
         assert_eq!(e.kind, EventKind::Sell); // from "action"
         assert_eq!(e.sol_amount, Some(1.5)); // from "quoteAmount"
@@ -314,7 +364,7 @@ mod tests {
     #[test]
     fn dex_filter_applies() {
         let (events, _, _) =
-            parse_stream(SAMPLE.as_bytes(), &DexFilter::only(Dex::Pump), &keep_all()).unwrap();
+            parse_stream(SAMPLE.as_bytes(), &DexFilter::only(Dex::Pump), &keep_all(), true).unwrap();
         // pump create (s2) + new-schema pump sell (s4) match; pump-amm buy filtered.
         assert_eq!(events.len(), 2);
         assert!(events.iter().all(|e| e.pool == "pump"));
@@ -325,11 +375,11 @@ mod tests {
         // Simulate a future rename where the action field is unknown: lines still
         // have "pool" but fail to deserialize (missing the required type field).
         let lines: String = (0..200)
-            .map(|i| format!(r#"{{"signature":"x{i}","pool":"pump","mint":"m{i}","timestamp":1}}"#))
+            .map(|i| format!(r#"{{"signature":"x{i}","pool":"pump","mint":"m{i}"}}"#))
             .collect::<Vec<_>>()
             .join("\n");
         let (events, _, stats) =
-            parse_stream(lines.as_bytes(), &DexFilter::all(), &keep_all()).unwrap();
+            parse_stream(lines.as_bytes(), &DexFilter::all(), &keep_all(), true).unwrap();
         assert_eq!(events.len(), 0);
         assert_eq!(stats.pool_lines, 200);
         assert_eq!(stats.parse_errors, 200);
