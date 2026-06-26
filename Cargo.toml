@@ -1,0 +1,26 @@
+[package]
+name = "pump-replayer"
+version = "0.1.0"
+edition = "2021"
+description = "Step-wise PumpApi historical replay downloader that builds per-token trade tapes for a given DEX, period and tape window, while keeping at most a sliding window of hours on disk."
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "pump_replayer"
+path = "src/lib.rs"
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
+zstd = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+log = "0.4"
+thiserror = "2"
+
+[dev-dependencies]
+env_logger = "0.11"
+
+[[example]]
+name = "run"
+path = "examples/run.rs"
